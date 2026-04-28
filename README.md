@@ -13,6 +13,7 @@ Audio: Includes a built-in 96kHz mono or 48kHz stereo ADC for audio capture.
 https://visualstudio.microsoft.com/vs/community/
 build tools, compiler, vs ide
 
+```
 git clone https://github.com/microsoft/vcpkg.git C:\dev\vcpkg
 .\bootstrap-vcpkg.bat
 .\vcpkg install opencv4:x64-windows
@@ -30,3 +31,4 @@ cmake --build build --config Release
   [2] OBS Virtual Camera
 
 .\build\Release\ms2109_capture 1
+```
