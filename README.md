@@ -2,7 +2,7 @@
 
 Capture the video stream from USB using low-cost capture board with MS2109 chip.
 
-The MS2109 is a highly integrated HDMI to USB 2.0 Video/Audio Capture Controller. 
+The MS2109 is a highly integrated HDMI to USB 2.0 Video/Audio Capture Controller.
 
 The board have following capabilities:
 
@@ -19,7 +19,7 @@ build tools, compiler, vs ide
 ```
 git clone https://github.com/microsoft/vcpkg.git C:\dev\vcpkg
 .\bootstrap-vcpkg.bat
-.\vcpkg install opencv4:x64-windows
+.\vcpkg install opencv4[world,dnn,onnx]:x64-windows
 .\vcpkg integrate install
 winget install Kitware.CMake
 ```
@@ -32,7 +32,8 @@ cmake --build build --config Release
 
 # Build (Windows, MSVC, vcpkg):
 ```
-     cl /std:c++17 /O2 /EHsc ms2109_capture.cpp /I <opencv-include> ^/        /link opencv_world4xx.lib ole32.lib oleaut32.lib strmiids.lib winmm.lib
+     cl /std:c++17 /O2 /EHsc ms2109_capture.cpp /I <opencv-include> ^
+        /link opencv_world4xx.lib ole32.lib oleaut32.lib strmiids.lib winmm.lib
 ```
 # Build (Linux):
 ```
@@ -49,11 +50,18 @@ cmake --build build --config Release
      ms2109_capture 1 720p60              -> 1280x720 @ 60 fps from device 1
      ms2109_capture "USB Video" 1080p30 out.avi -> record to out.avi
 
- Flags (any position after the device arg): 
+ Flags (any position after the device arg):
      --no-display       : don't show a preview window (max headless throughput)
      --display-every N  : only blit every Nth frame to the window (default 1)
      --display-scale F  : downscale preview by factor F (e.g. 0.5)
      --bench S          : exit after S seconds, print average capture FPS
+
+ YOLO object-detection flags (any position):
+     --yolo-model PATH    : path to ONNX model (YOLOv5-v8 recommended)
+     --yolo-classes PATH  : optional newline-separated class list
+
+     Example:
+         ms2109_capture 1 --yolo-model yolov8n.onnx --yolo-classes coco.names
 
 Press 'q' or ESC to quit. Press 's' to snapshot a still PNG.
 ```
@@ -67,3 +75,29 @@ Press 'q' or ESC to quit. Press 's' to snapshot a still PNG.
 
 .\build\Release\ms2109_capture 1
 ```
+
+# YOLO Model Setup
+
+1. Download a pretrained YOLO model in **ONNX** format. Recommended:
+   - [Ultralytics YOLOv8n-seg](https://github.com/ultralytics/assets/releases/tag/v8.1.0) – small & fast
+   - [YOLOv5n ONNX](https://github.com/ultralytics/yolov5/releases)
+
+2. If your model does not use the standard COCO 80-class list, create a text file with one class name per line and pass it via `--yolo-classes`.
+
+3. Place the `.onnx` file in the same directory as the executable or provide an absolute path.
+
+# Pipeline Architecture with YOLO
+
+```
+[USB driver] -> [capture thread: cap.read()]
+                     |
+                     +--(mailbox)--> [main thread: imshow]
+                     |
+                     +--(bounded queue)--> [YOLO thread: inference + annotation]
+                                                 |
+                                                 +--(mailbox)--> [main thread: imshow]
+```
+
+- Capture thread never waits on display or disk I/O.
+- YOLO runs on its own thread with a bounded queue (drops frames if inference is slower than capture).
+- Main thread always shows the latest annotated frame from YOLO if enabled, otherwise the raw frame.

@@ -38,10 +38,16 @@ find_package(OpenCV REQUIRED)
 
 add_executable(ms2109_capture
     ms2109_device.cpp
+    ms2109_yolo.cpp
     ms2109_main.cpp
 )
 target_link_libraries(ms2109_capture PRIVATE ${OpenCV_LIBS})
 target_include_directories(ms2109_capture PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# confirm dnn module is available
+if(OpenCV_VERSION VERSION_LESS "4.5")
+    message(WARNING "OpenCV ${OpenCV_VERSION} may be too old for DNN ONNX; 4.7+ recommended.")
+endif()
 
 # On Windows we also need DirectShow / multimedia system libraries.
 if(WIN32)

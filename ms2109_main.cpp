@@ -35,19 +35,35 @@
 //     --display-scale F  : downscale preview by factor F (e.g. 0.5)
 //     --bench S          : exit after S seconds, print average capture FPS
 //
+// YOLO flags (requires an ONNX model and optional class-names file):
+//     --yolo-model PATH        : path to ONNX model (YOLOv5 / v8)
+//     --yolo-classes PATH      : optional newline-separated class list
+//     --yolo-conf F            : confidence threshold (default 0.25, OBB 0.50)
+//     --yolo-nms  F            : NMS IoU threshold (default 0.45)
+//
+// NOTE: a YOLO model only produces useful detections on input that matches
+// what it was trained on. The Ultralytics *-obb checkpoints are trained on
+// DOTA (top-down aerial imagery) and will spew junk "ship" / "plane" boxes
+// on ordinary video. For HDMI capture / general video use a COCO-trained
+// model such as yolov8n.onnx.
+//
 // Press 'q' or ESC to quit. Press 's' to snapshot a still PNG.
 
 #include "ms2109_common.hpp"
 #include "ms2109_device.hpp"
 #include "ms2109_pipeline.hpp"
+#include "ms2109_yolo.hpp"
 
 #include <string>
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <memory>
 
 #ifdef _WIN32
-  #define WIN32_LEAN_AND_MEAN
+  #ifndef WIN32_LEAN_AND_MEAN
+    #define WIN32_LEAN_AND_MEAN
+  #endif
   #include <windows.h>
   #include <timeapi.h>
   #pragma comment(lib, "winmm.lib")
@@ -62,26 +78,47 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    // Positional: <device> [mode] [outfile]
-    std::string devArg  = (argc > 1) ? argv[1] : "0";
-    Mode mode           = (argc > 2 && argv[2][0] != '-') ? parseMode(argv[2]) : Mode{1920,1080,30};
-    std::string outFile = (argc > 3 && argv[3][0] != '-') ? argv[3] : "";
-
-    // Flags (anywhere after the device arg).
+    // Parse flags first, collect positional args from leftovers.
     bool   showDisplay  = true;
     int    displayEvery = 1;
     double displayScale = 1.0;
     double benchSeconds = 0.0;
+    std::string yoloModelPath;
+    std::string yoloClassesPath;
+    float yoloConf = -1.0f;   // -1 = "use detector default"
+    float yoloNms  = -1.0f;
+    std::vector<std::string> positional;
+
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
-        if (a == "--no-display")                        showDisplay = false;
-        else if (a == "--display-every" && i+1 < argc) {
+        if (a == "--no-display") {
+            showDisplay = false;
+        } else if (a == "--display-every" && i + 1 < argc) {
             int v = std::atoi(argv[++i]);
             displayEvery = v > 1 ? v : 1;
+        } else if (a == "--display-scale" && i + 1 < argc) {
+            displayScale = std::atof(argv[++i]);
+        } else if (a == "--bench" && i + 1 < argc) {
+            benchSeconds = std::atof(argv[++i]);
+        } else if (a == "--yolo-model" && i + 1 < argc) {
+            yoloModelPath = argv[++i];
+        } else if (a == "--yolo-classes" && i + 1 < argc) {
+            yoloClassesPath = argv[++i];
+        } else if (a == "--yolo-conf" && i + 1 < argc) {
+            yoloConf = static_cast<float>(std::atof(argv[++i]));
+        } else if (a == "--yolo-nms" && i + 1 < argc) {
+            yoloNms = static_cast<float>(std::atof(argv[++i]));
+        } else if (a[0] == '-') {
+            std::cerr << "Unknown flag: " << a << "\n";
+        } else {
+            positional.push_back(a);
         }
-        else if (a == "--display-scale" && i+1 < argc) displayScale = std::atof(argv[++i]);
-        else if (a == "--bench" && i+1 < argc)         benchSeconds = std::atof(argv[++i]);
     }
+
+    // Positional: <device> [mode] [outfile]
+    std::string devArg  = !positional.empty() ? positional[0] : "0";
+    Mode mode           = (positional.size() > 1) ? parseMode(positional[1]) : Mode{1920, 1080, 30};
+    std::string outFile = (positional.size() > 2) ? positional[2] : "";
 
 #ifdef _WIN32
     // Boost timer resolution to 1ms. Without this, std::this_thread::sleep_for
@@ -175,6 +212,25 @@ int main(int argc, char** argv) {
         cv::resizeWindow("MS2109 capture", 1280, 720);
     }
 
+    // ---- Optional YOLO object-detection thread ---------------------------
+    YoloPipeline yoloPipeline;
+    bool yoloEnabled = !yoloModelPath.empty();
+    if (yoloEnabled) {
+        // -1 means "let the detector pick its own default". The detector
+        // raises the conf floor for OBB models because they're much noisier
+        // on out-of-domain inputs.
+        float useConf = (yoloConf >= 0.0f) ? yoloConf : 0.25f;
+        float useNms  = (yoloNms  >= 0.0f) ? yoloNms  : 0.45f;
+        if (!yoloPipeline.detector.loadModel(yoloModelPath, yoloClassesPath,
+                                             useConf, useNms)) {
+            std::cerr << "Failed to load YOLO model: " << yoloModelPath << "\n";
+            return 3;
+        }
+        yoloPipeline.start();
+        std::cout << "YOLO enabled (model: " << yoloModelPath
+                  << ", conf=" << useConf << ", nms=" << useNms << ")\n";
+    }
+
     // ---- Capture thread --------------------------------------------------
     // Reads frames as fast as the device delivers, posts to mailbox, and
     // pushes to record queue. Never blocks on display.
@@ -193,6 +249,9 @@ int main(int argc, char** argv) {
                 continue;
             }
             mailbox.post(frame);
+            if (yoloEnabled) {
+                yoloPipeline.push(frame);  // non-blocking; drops if queue full
+            }
             if (writer.isOpened()) recQ.push(frame);
             capCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -211,13 +270,19 @@ int main(int argc, char** argv) {
     // ---- Main thread: display + key handling -----------------------------
     cv::Mat   displayed;
     uint64_t  lastSeen     = 0;
+    uint64_t  yoloLastSeen = 0;
     int       displayCount = 0;
     int       snapshotIdx  = 0;
     auto      benchStart   = clk::now();
     cv::Mat   scaled;       // reused buffer for downscaled preview
 
     while (running.load(std::memory_order_relaxed)) {
-        bool fresh = mailbox.tryTake(lastSeen, displayed);
+        bool fresh = false;
+        if (yoloEnabled) {
+            fresh = yoloPipeline.tryTake(yoloLastSeen, displayed);
+        } else {
+            fresh = mailbox.tryTake(lastSeen, displayed);
+        }
 
         if (fresh && showDisplay && (displayCount++ % displayEvery == 0)) {
             if (displayScale > 0.0 && displayScale < 1.0) {
@@ -256,6 +321,13 @@ int main(int argc, char** argv) {
     running = false;
     captureThread.join();
     cap.release();
+
+    if (yoloEnabled) {
+        yoloPipeline.stop();
+        std::cout << "  YOLO processed "
+                  << yoloPipeline.processedCount.load()
+                  << " frames\n";
+    }
 
     if (writer.isOpened()) {
         recQ.close();
