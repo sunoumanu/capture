@@ -36,9 +36,17 @@ endif()
 # pkg-config / system OpenCV is found the same way.
 find_package(OpenCV REQUIRED)
 
-add_executable(ms2109_capture ms2109_capture.cpp)
+add_executable(ms2109_capture
+    ms2109_device.cpp
+    ms2109_main.cpp
+)
 target_link_libraries(ms2109_capture PRIVATE ${OpenCV_LIBS})
 target_include_directories(ms2109_capture PRIVATE ${OpenCV_INCLUDE_DIRS})
+
+# On Windows we also need DirectShow / multimedia system libraries.
+if(WIN32)
+    target_link_libraries(ms2109_capture PRIVATE ole32 oleaut32 strmiids winmm)
+endif()
 
 # MSVC-specific niceties: sane warning level, UTF-8 source, no min/max macros.
 if(MSVC)
