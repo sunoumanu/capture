@@ -40,6 +40,7 @@
 //     --yolo-classes PATH      : optional newline-separated class list
 //     --yolo-conf F            : confidence threshold (default 0.25, OBB 0.50)
 //     --yolo-nms  F            : NMS IoU threshold (default 0.45)
+//     --yolo-every N           : run inference on every Nth frame (default 1)
 //
 // NOTE: a YOLO model only produces useful detections on input that matches
 // what it was trained on. The Ultralytics *-obb checkpoints are trained on
@@ -85,8 +86,9 @@ int main(int argc, char** argv) {
     double benchSeconds = 0.0;
     std::string yoloModelPath;
     std::string yoloClassesPath;
-    float yoloConf = -1.0f;   // -1 = "use detector default"
-    float yoloNms  = -1.0f;
+    float yoloConf  = -1.0f;   // -1 = "use detector default"
+    float yoloNms   = -1.0f;
+    int   yoloEvery = 1;       // run inference every Nth captured frame
     std::vector<std::string> positional;
 
     for (int i = 1; i < argc; ++i) {
@@ -108,6 +110,9 @@ int main(int argc, char** argv) {
             yoloConf = static_cast<float>(std::atof(argv[++i]));
         } else if (a == "--yolo-nms" && i + 1 < argc) {
             yoloNms = static_cast<float>(std::atof(argv[++i]));
+        } else if (a == "--yolo-every" && i + 1 < argc) {
+            int v = std::atoi(argv[++i]);
+            yoloEvery = v > 1 ? v : 1;
         } else if (a[0] == '-') {
             std::cerr << "Unknown flag: " << a << "\n";
         } else {
@@ -228,7 +233,8 @@ int main(int argc, char** argv) {
         }
         yoloPipeline.start();
         std::cout << "YOLO enabled (model: " << yoloModelPath
-                  << ", conf=" << useConf << ", nms=" << useNms << ")\n";
+                  << ", conf=" << useConf << ", nms=" << useNms
+                  << ", every=" << yoloEvery << ")\n";
     }
 
     // ---- Capture thread --------------------------------------------------
@@ -242,6 +248,7 @@ int main(int argc, char** argv) {
     std::thread captureThread([&]{
         cv::Mat frame;
         int    local = 0;
+        uint64_t capSerial = 0;
         auto   t0 = clk::now();
         while (running.load(std::memory_order_relaxed)) {
             if (!cap.read(frame) || frame.empty()) {
@@ -249,9 +256,13 @@ int main(int argc, char** argv) {
                 continue;
             }
             mailbox.post(frame);
-            if (yoloEnabled) {
+            // Subsample inference: feed YOLO only every Nth frame. The
+            // worker also drops if its queue is full, but throttling here
+            // avoids the per-frame .clone() cost on skipped frames.
+            if (yoloEnabled && (capSerial % yoloEvery == 0)) {
                 yoloPipeline.push(frame);  // non-blocking; drops if queue full
             }
+            ++capSerial;
             if (writer.isOpened()) recQ.push(frame);
             capCount.fetch_add(1, std::memory_order_relaxed);
 
@@ -274,17 +285,32 @@ int main(int argc, char** argv) {
     int       displayCount = 0;
     int       snapshotIdx  = 0;
     auto      benchStart   = clk::now();
-    cv::Mat   scaled;       // reused buffer for downscaled preview
+    cv::Mat   scaled;                       // reused buffer for downscaled preview
+    std::vector<Detection> lastDetections;  // most recent detections, applied to every frame
 
     while (running.load(std::memory_order_relaxed)) {
-        bool fresh = false;
+        // ALWAYS pull the freshest captured frame — display rate must equal
+        // capture rate. YOLO output is layered on top as a separate channel
+        // so a slow detector cannot drag preview FPS down.
+        bool fresh = mailbox.tryTake(lastSeen, displayed);
+
         if (yoloEnabled) {
-            fresh = yoloPipeline.tryTake(yoloLastSeen, displayed);
-        } else {
-            fresh = mailbox.tryTake(lastSeen, displayed);
+            // Refresh the cached detection vector if the worker has
+            // produced a new one. If not, keep drawing the previous one —
+            // boxes will lag the video by a few frames, but the video
+            // itself keeps flowing at full FPS.
+            std::vector<Detection> latest;
+            if (yoloPipeline.tryTakeDetections(yoloLastSeen, latest)) {
+                lastDetections = std::move(latest);
+            }
         }
 
         if (fresh && showDisplay && (displayCount++ % displayEvery == 0)) {
+            if (yoloEnabled && !lastDetections.empty()) {
+                // drawDetections mutates in place; that's fine because
+                // mailbox.tryTake already gave us our own copy.
+                YoloDetector::drawDetections(displayed, lastDetections);
+            }
             if (displayScale > 0.0 && displayScale < 1.0) {
                 cv::resize(displayed, scaled, cv::Size(), displayScale, displayScale,
                            cv::INTER_NEAREST); // INTER_NEAREST is fastest; quality irrelevant for preview

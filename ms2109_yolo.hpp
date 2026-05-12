@@ -61,7 +61,13 @@ private:
 };
 
 // ------------------------------------------------------------------
-// YoloPipeline  -- threaded consumer: raw frames in, annotated out.
+// YoloPipeline  -- threaded consumer: raw frames in, detections out.
+//
+// The mailbox holds *detections only*, not an annotated frame. The display
+// thread always shows the latest captured frame and overlays the freshest
+// detections on top — that way display FPS = capture FPS even when
+// inference is slow (boxes simply lag a few frames). Pushing annotated
+// Mats would tie display rate to inference rate.
 // ------------------------------------------------------------------
 struct YoloPipeline {
     std::mutex m;
@@ -73,9 +79,9 @@ struct YoloPipeline {
     YoloDetector detector;
 
     struct Mailbox {
-        std::mutex m;
-        cv::Mat    frame;
-        uint64_t   serial = 0;
+        std::mutex                 m;
+        std::vector<Detection>     detections;
+        uint64_t                   serial = 0;
     } outMailbox;
 
     std::thread thread;
@@ -83,8 +89,8 @@ struct YoloPipeline {
 
     void start();
     void stop();
-    bool push(const cv::Mat& f);          // false = dropped (queue full)
-    bool tryTake(uint64_t& lastSeen, cv::Mat& out);
+    bool push(const cv::Mat& f);                                       // false = dropped (queue full)
+    bool tryTakeDetections(uint64_t& lastSeen, std::vector<Detection>& out);
 };
 
 #endif // MS2109_YOLO_HPP

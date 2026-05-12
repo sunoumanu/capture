@@ -417,22 +417,29 @@ void YoloPipeline::start() {
             // here (the OBB model's axis-out-of-range assertion is the one
             // that bit us) would unwind through std::thread and call
             // std::terminate, killing the entire capture program.
+            std::vector<Detection> detections;
             try {
-                auto detections = detector.detect(frame);
-                detector.drawDetections(frame, detections);
+                detections = detector.detect(frame);
             } catch (const cv::Exception& e) {
                 std::cerr << "YOLO worker: OpenCV exception, frame skipped: "
                           << e.what() << "\n";
+                continue;
             } catch (const std::exception& e) {
                 std::cerr << "YOLO worker: exception, frame skipped: "
                           << e.what() << "\n";
+                continue;
             } catch (...) {
                 std::cerr << "YOLO worker: unknown exception, frame skipped\n";
+                continue;
             }
 
+            // Publish detections only — *not* an annotated frame. The display
+            // thread will overlay these onto whatever the freshest captured
+            // frame happens to be, so display FPS stays at capture FPS even
+            // when inference is much slower.
             {
                 std::lock_guard<std::mutex> lk(outMailbox.m);
-                frame.copyTo(outMailbox.frame);
+                outMailbox.detections = std::move(detections);
                 ++outMailbox.serial;
             }
             processedCount.fetch_add(1, std::memory_order_relaxed);
@@ -458,10 +465,11 @@ bool YoloPipeline::push(const cv::Mat& f) {
     return true;
 }
 
-bool YoloPipeline::tryTake(uint64_t& lastSeen, cv::Mat& out) {
+bool YoloPipeline::tryTakeDetections(uint64_t& lastSeen,
+                                     std::vector<Detection>& out) {
     std::lock_guard<std::mutex> lk(outMailbox.m);
-    if (outMailbox.serial == lastSeen || outMailbox.frame.empty()) return false;
-    outMailbox.frame.copyTo(out);
+    if (outMailbox.serial == lastSeen) return false;
+    out = outMailbox.detections;   // small vector copy under the lock
     lastSeen = outMailbox.serial;
     return true;
 }
