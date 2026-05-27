@@ -2,6 +2,8 @@
 
 Capture the video stream from USB using low-cost capture board with MS2109 chip.
 
+Showcase at https://www.youtube.com/watch?v=T6FTVteCrV0
+
 The MS2109 is a highly integrated HDMI to USB 2.0 Video/Audio Capture Controller.
 
 The board have following capabilities:
