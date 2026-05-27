@@ -1,6 +1,6 @@
 # Summary
 
-Capture the video stream from USB using low-cost capture board with MS2109 chip.
+Capture the video stream from USB using low-cost capture board with MS2109 chip and use YOLO as object detection with bounding boxes.
 
 Showcase at https://www.youtube.com/watch?v=T6FTVteCrV0
 
